@@ -1,7 +1,9 @@
+import time
+from enum import Enum
 from pprint import pprint
 import logging
 from grpc._cython.cygrpc import Optional
-from tinkoff.invest import Client, MoneyValue, OrderDirection, OrderType
+from tinkoff.invest import Client, MoneyValue, OrderDirection, OrderType, OrderExecutionReportStatus
 from decimal import Decimal
 from tinkoff.invest.constants import INVEST_GRPC_API, INVEST_GRPC_API_SANDBOX
 from dotenv import load_dotenv
@@ -20,6 +22,11 @@ logging.basicConfig(
 )
 logging.getLogger("tinkoff").setLevel(log_level)
 logger = logging.getLogger(__name__)
+
+
+class TypeOfStrategy(Enum):
+    FIND_FIRST_ITEM_IN_PORTFOLIO_AND_SELL = 1
+    PLACE_NEW_ORDER_AND_THEN_SELL_IT = 2
 
 
 # Assumption: Bot trades whole list of shares
@@ -59,7 +66,6 @@ class TradingBot:
         )
 
     def start_strategy(self, order=False):
-
         if order == False:
 
             instrument_id = self.get_instrument_of_the_strategy()
@@ -75,10 +81,23 @@ class TradingBot:
                 order_type=order_type
             )
             pprint(res)
-            logger.info("Posted order with order_id %s", res.order_id)
+            order_id = res.order_id
+            logger.info("Posted order with order_id %s", order_id)
+
+            order_fulfilled = False
+            while order_fulfilled == False:
+                res = self.sync_client.orders.get_order_state(account_id=self.account_id, order_id=order_id)
+                status = res.execution_report_status
+                if status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL:
+                    time.sleep(3)
+                else:
+                    logger.info("Order %s executed", order_id)
+                    order_fulfilled = True
+                    pprint(res)
+
+
         else:
             logger.info("Start to work with present order")
-            direction = OrderDirection.ORDER_DIRECTION_SELL
 
     def get_order_to_work(self):
         orders = self.list_orders()
@@ -121,7 +140,6 @@ class TradingBot:
         order = self.get_order_to_work()
         # TODO can start the strategy with selected account,or the porfolio item
         self.start_strategy(order)
-        # pprint(self.list_orders())
         # self.list_portfolio()
         # list_securities(client)
 
