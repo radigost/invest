@@ -1,11 +1,15 @@
+import decimal
+import math
 import time
 from datetime import datetime
 from enum import Enum
 from pprint import pprint
+from order_service import OrderService
 import logging
 from grpc._cython.cygrpc import Optional
 from tinkoff.invest import Client, MoneyValue, OrderDirection, OrderType, OrderExecutionReportStatus, CandleInterval, \
-    SecurityTradingStatus, Quotation, OrderState, PostOrderResponse, PortfolioPosition
+    SecurityTradingStatus, Quotation, OrderState, PostOrderResponse, PortfolioPosition, PriceType, StopOrderDirection, \
+    StopOrderType
 from decimal import Decimal
 from tinkoff.invest.constants import INVEST_GRPC_API, INVEST_GRPC_API_SANDBOX
 from dotenv import load_dotenv
@@ -33,7 +37,16 @@ class TypeOfStrategy(Enum):
 
 # Assumption: Bot trades whole list of shares
 
+def to_float(value: MoneyValue | Quotation) -> float:
+    return float(str(value.units) + '.' + str(value.nano))
+
+
+def get_decimal_part(fl):
+    return int(math.ceil((fl % 1) * pow(10, str(fl)[::-1].find('.'))))
+
+
 class TradingBot:
+
     def __init__(self, token, target, sandbox: bool):
         self.token = token
         self.target = target
@@ -41,19 +54,94 @@ class TradingBot:
         # self.client: Optional[AsyncServices]
         self.sync_client: Optional[Services]
         self.account_id: Optional[str]
-        self.commision = 0.0004
+        self.commission = 0.0004
         self.target_daily_profitability = 0.01
+        self.stop_loss_profitability = 0.01
         # self.market_data_cache: Optional[MarketDataCache] = None
         self.sync_client = Client(self.token, target=self.target).__enter__()
-        self.init()
-
-    def init(self):
-        # if (self.sandbox == True):
-        # self.sandox_flush_all_accounts_and_reinitiate_one()
         res = self.sync_client.users.get_accounts()
         account = res.accounts[0]
         self.account_id = account.id
         logger.info("set up account to trade [%s]", self.account_id)
+        self.order_service = OrderService(self.sync_client)
+
+    # if (self.sandbox == True):
+    # self.sandox_flush_all_accounts_and_reinitiate_one()
+
+    def main(self):
+
+        # stock_name = "GAZP"
+        # buy_or_sell = "BUY"
+        amount = 1
+
+        order = self.order_service.get_order_to_work(self.account_id)
+        # TODO can start the strategy with selected account,or the porfolio item
+        self.start_strategy(order)
+        self.list_portfolio()
+        # list_securities(client)
+
+    def start_strategy(self, order: OrderState = None):
+        instrument_id = self.__get_instrument_of_the_strategy()
+        quantity_lots = 1
+        bought_price = 0
+        if order is None:
+            # we are starting from scratch
+            position_in_portfolio = self.__get_position_to_sell(instrument_id)
+            if (position_in_portfolio) is None:
+                logger.info("Create new order")
+                quantity_lots = 1
+                direction = OrderDirection.ORDER_DIRECTION_BUY
+                order_type = OrderType.ORDER_TYPE_BESTPRICE
+                order = self.order_service.post_order(quantity_lots, instrument_id, direction,
+                                                      order_type, self.account_id)
+                bought_price = self.order_service.wait_order_fulfillment(order, self.account_id)
+            else:
+                logger.info("We have this position in portfolio, start to work with it")
+                quantity_lots = position_in_portfolio.quantity_lots
+                bought_price = position_in_portfolio.average_position_price
+        else:
+            # TODO also need to wait until market is open
+            logger.info("Start to work with present unfullfilled order, order %s", str(order))
+            quantity_lots = order.lots_requested
+            bought_price = self.order_service.wait_order_fulfillment(order, self.account_id)
+
+        # quote = Quotation(first_part, decimal_part)
+        # self.sync_client.stop_orders.post_stop_order(
+        #     quantity=quantity_lots.units,
+        #     instrument_id=instrument_id,
+        #     stop_price=quote,
+        #     account_id=self.account_id,
+        #     direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+        #     stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS
+        # )
+        self.__wait_to_sell_and_get_position_to_sell(instrument_id, bought_price)
+        sell_order = self.order_service.post_order(quantity=quantity_lots,
+                                                   instrument_id=instrument_id,
+                                                   direction=OrderDirection.ORDER_DIRECTION_SELL,
+                                                   order_type=OrderType.ORDER_TYPE_BESTPRICE,
+                                                   account_id=self.account_id)
+        selled_price = self.order_service.wait_order_fulfillment(sell_order, self.account_id)
+
+        # TODO can be different currency
+        result = to_float(selled_price) - to_float(bought_price)
+        logger.info("result is %s (without commissions)", result)
+
+    def __get_position_to_sell(self, instrument_id):
+        res = self.sync_client.operations.get_portfolio(account_id=self.account_id)
+        position_to_sell = next((x for x in res.positions if x.instrument_uid == instrument_id), None)
+        # TODO it can happen that we do not have that instrument in the portpolio
+        logger.info("We have %s lots of %s", position_to_sell.quantity_lots.units, instrument_id)
+        return position_to_sell
+
+    def __wait_to_sell_and_get_position_to_sell(self, instrument_id, bought_price: Quotation) -> bool:
+        logger.info("waiting to sell instrument (instrument_id : %s)", instrument_id)
+        self.__wait_market_to_open(instrument_id)
+        sell_signal = False
+        while sell_signal == False:
+            time.sleep(10)
+            sell_signal = self.__get_compared_difference(bought_price=bought_price,
+                                                         instrument_id=instrument_id)
+        return True
 
     def sandox_flush_all_accounts_and_reinitiate_one(self):
         res = self.sync_client.users.get_accounts()
@@ -71,100 +159,34 @@ class TradingBot:
             amount=MoneyValue(units=money.units, nano=money.nano, currency=currency),
         )
 
-    def start_strategy(self, order: OrderState = None):
-        if order is None:
-            logger.info("Create new order")
-            instrument_id = self.__get_instrument_of_the_strategy()
-            quantity = 1
-            direction = OrderDirection.ORDER_DIRECTION_BUY
-            order_type = OrderType.ORDER_TYPE_BESTPRICE
-
-            order = self.__post_order(quantity, instrument_id, direction,
-                                      order_type)
-        else:
-            logger.info("Start to work with present order, order %s", str(order))
-
-        bought_price = self.__wait_order_fulfillment(order)
-        position = self.__get_position_to_sell(order.instrument_uid, bought_price)
-        sell_order = self.__post_order(quantity=position.quantity_lots.units,
-                                       instrument_id=position.instrument_uid,
-                                       direction=OrderDirection.ORDER_DIRECTION_SELL,
-                                       order_type=OrderType.ORDER_TYPE_BESTPRICE)
-        selled_price = self.__wait_order_fulfillment(sell_order)
-
-        # TODO can be different currency
-        result = self.to_float(selled_price) - self.to_float(bought_price)
-        logger.info("result is %s (without commissions)", result)
-
-    def __wait_order_fulfillment(self, order: OrderState | PostOrderResponse):
-        order_fulfilled = False
-        while order_fulfilled == False:
-            res = self.sync_client.orders.get_order_state(account_id=self.account_id, order_id=order.order_id)
-            status = res.execution_report_status
-            if status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL:
-                time.sleep(3)
-            else:
-                executed_price = res.executed_order_price
-                logger.info("Executed order_id %s, with price %s and direction %s : %s", order.order_id, executed_price,
-                            order.direction, str(res))
-                return executed_price
-
-    def __post_order(self, quantity, instrument_id, direction, order_type) -> PostOrderResponse:
-        res = self.sync_client.orders.post_order(
-            quantity=quantity,
-            instrument_id=instrument_id,
-            direction=direction,
-            account_id=self.account_id,
-            order_type=order_type
-        )
-        logger.debug("posted order: %s", str(res))
-        return res
-
     def __get_instrument_of_the_strategy(self):
         GAZPROM_SHARES = '962e2a95-02a9-4171-abd7-aa198dbe643a'
-        return GAZPROM_SHARES
-
-    def __get_position_to_sell(self, instrument_id, bought_price: Quotation) -> PortfolioPosition:
-        logger.info("waiting to sell instrument (instrument_id : %s)", instrument_id)
-        res = self.sync_client.operations.get_portfolio(account_id=self.account_id)
-        position = next((x for x in res.positions if x.instrument_uid == instrument_id), None)
-        # TODO it can happen that we do not have that instrument in the portpolio
-        logger.info("We have %s lots of %s", position.quantity_lots.units, instrument_id)
-
-        self.__wait_market_to_open(instrument_id)
-
-        sell_signal = False
-        while sell_signal == False:
-            time.sleep(10)
-            sell_signal = self.__get_compared_difference(bought_price=bought_price,
-                                                         instrument_id=instrument_id)
-
-        # res = self.sync_client.market_data.get_candles(instrument_id=instrument_id,
-        #                                                from_=datetime(2023, 1, 17, 00, 00),
-        #                                                to=datetime(2023, 1, 18, 9, 0),
-        #                                                interval=CandleInterval.CANDLE_INTERVAL_30_MIN)
-        # pprint(res)
-
-        return position
+        YANDEX_SHARES = '10e17a87-3bce-4a1f-9dfc-720396f98a3c'
+        return YANDEX_SHARES
 
     def __get_compared_difference(self, bought_price, instrument_id):
+        stop_position_price = to_float(bought_price) * (1 - self.stop_loss_profitability)
+
         res = self.sync_client.market_data.get_last_prices(instrument_id=[instrument_id])
         sell_price = res.last_prices[0].price
-        compared_difference_with_commissions = self.to_float(sell_price) - self.to_float(bought_price) - self.to_float(
-            bought_price) * self.commision - self.to_float(sell_price) * self.commision
-        margin = 100 * compared_difference_with_commissions / self.to_float(bought_price)
+        compared_difference_with_commissions = to_float(sell_price) - to_float(bought_price) - to_float(
+            bought_price) * self.commission - to_float(sell_price) * self.commission
+        margin = 100 * compared_difference_with_commissions / to_float(bought_price)
         logger.info("BuyPrice: %s,Price: %s, Difference: %s, Margin: %s",
-                    self.to_float(bought_price),
-                    self.to_float(sell_price),
+                    to_float(bought_price),
+                    to_float(sell_price),
                     compared_difference_with_commissions, margin)
-        return margin > 1
+
+        return margin > 1 or to_float(sell_price) <= stop_position_price
 
     def __wait_market_to_open(self, instrument_id):
+
         can_trade = False
         while can_trade != True:
             res = self.sync_client.market_data.get_trading_status(instrument_id=instrument_id)
             # TODO there can be values of api_trade_available_flag,market_order_available_flag, limit_order_available_flag , they also can affect availability to trade
-            if res.trading_status != SecurityTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING:
+            if res.trading_status != SecurityTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING and res.trading_status != SecurityTradingStatus.SECURITY_TRADING_STATUS_DEALER_NORMAL_TRADING:
+
                 time_to_sleep = 20
                 logger.info("Trade is not open for work (status is %s), wait for %d seconds", res.trading_status,
                             time_to_sleep)
@@ -172,45 +194,12 @@ class TradingBot:
             else:
                 can_trade = True
 
-    def list_orders(self):
-        res = self.sync_client.orders.get_orders(account_id=self.account_id)
-        return res.orders
-
-    def cancel_all_orders(self):
-        res = self.list_orders()
-        for order in res.orders:
-            self.sync_client.orders.cancel_order(account_id=self.account_id, order_id=order.order_id)
-
     def list_securities(client):
         pprint("list_secrutities")
 
     def list_portfolio(self):
         res = self.sync_client.operations.get_portfolio(account_id=self.account_id)
         pprint(res)
-
-    def main(self):
-
-        stock_name = "GAZP"
-        buy_or_sell = "BUY"
-        amount = 1
-
-        order = self.get_order_to_work()
-        # TODO can start the strategy with selected account,or the porfolio item
-        self.start_strategy(order)
-        self.list_portfolio()
-        # list_securities(client)
-
-    def get_order_to_work(self):
-        orders = self.list_orders()
-        if len(orders) == 0:
-            logger.info("We have no pending orders")
-            return None
-        else:
-            # TODO if we start 2 bots one after another, first generated order, second bot starts after pending order is created, then 2 bots will work with same order, which is a bug, but at the moment I have 0 working instancesm hence need to change the logic before the prod
-            return orders[0]
-
-    def to_float(self, value: MoneyValue | Quotation) -> float:
-        return float(str(value.units) + '.' + str(value.nano))
 
 
 bot = TradingBot(TOKEN, TARGET, sandbox=True)
