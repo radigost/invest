@@ -97,7 +97,7 @@ class TradingBot:
                 bought_price = self.order_service.wait_order_fulfillment(order, self.account_id)
             else:
                 logger.info("We have this position in portfolio, start to work with it")
-                quantity_lots = position_in_portfolio.quantity_lots
+                quantity_lots = position_in_portfolio.quantity_lots.units
                 bought_price = position_in_portfolio.average_position_price
         else:
             # TODO also need to wait until market is open
@@ -164,7 +164,7 @@ class TradingBot:
         YANDEX_SHARES = '10e17a87-3bce-4a1f-9dfc-720396f98a3c'
         return YANDEX_SHARES
 
-    def __get_amount_to_buy(self, instrument_id):
+    def __get_amount_to_buy(self, instrument_id) -> int:
         prices = self.sync_client.market_data.get_last_prices(instrument_id=[instrument_id])
         price = to_float(prices.last_prices[0].price)
         logger.info("Price - %s", str(price))
@@ -183,7 +183,7 @@ class TradingBot:
             number_of_shares_in_lot = share_info.instrument.lot
             amount = int((free_capital * self.buy_free_capital_percentage) / (price * number_of_shares_in_lot))
             amount = 1 if amount < 0 else amount
-            logger.info("We will by %s lots",amount)
+            logger.info("We will by %s lots", amount)
             return amount
 
     def __get_compared_difference(self, bought_price, instrument_id):

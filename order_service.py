@@ -11,7 +11,7 @@ class OrderService():
     def __init__(self, sync_client: Services):
         self.sync_client = sync_client
 
-    def post_order(self, quantity, instrument_id, direction, order_type, account_id) -> PostOrderResponse:
+    def post_order(self, quantity: int, instrument_id, direction, order_type, account_id) -> PostOrderResponse:
         res = self.sync_client.orders.post_order(
             quantity=quantity,
             instrument_id=instrument_id,
