@@ -9,7 +9,7 @@ import logging
 from grpc._cython.cygrpc import Optional
 from tinkoff.invest import Client, MoneyValue, OrderDirection, OrderType, OrderExecutionReportStatus, CandleInterval, \
     SecurityTradingStatus, Quotation, OrderState, PostOrderResponse, PortfolioPosition, PriceType, StopOrderDirection, \
-    StopOrderType
+    StopOrderType, InstrumentType, InstrumentIdType
 from decimal import Decimal
 from tinkoff.invest.constants import INVEST_GRPC_API, INVEST_GRPC_API_SANDBOX
 from dotenv import load_dotenv
@@ -57,6 +57,7 @@ class TradingBot:
         self.commission = 0.0004
         self.target_daily_profitability = 0.01
         self.stop_loss_profitability = 0.01
+        self.buy_free_capital_percentage = 0.1
         # self.market_data_cache: Optional[MarketDataCache] = None
         self.sync_client = Client(self.token, target=self.target).__enter__()
         res = self.sync_client.users.get_accounts()
@@ -77,8 +78,7 @@ class TradingBot:
         order = self.order_service.get_order_to_work(self.account_id)
         # TODO can start the strategy with selected account,or the porfolio item
         self.start_strategy(order)
-        self.list_portfolio()
-        # list_securities(client)
+        self.get_portfolio()
 
     def start_strategy(self, order: OrderState = None):
         instrument_id = self.__get_instrument_of_the_strategy()
@@ -89,7 +89,7 @@ class TradingBot:
             position_in_portfolio = self.__get_position_to_sell(instrument_id)
             if (position_in_portfolio) is None:
                 logger.info("Create new order")
-                quantity_lots = 1
+                quantity_lots = self.__get_amount_to_buy(instrument_id)
                 direction = OrderDirection.ORDER_DIRECTION_BUY
                 order_type = OrderType.ORDER_TYPE_BESTPRICE
                 order = self.order_service.post_order(quantity_lots, instrument_id, direction,
@@ -164,6 +164,28 @@ class TradingBot:
         YANDEX_SHARES = '10e17a87-3bce-4a1f-9dfc-720396f98a3c'
         return YANDEX_SHARES
 
+    def __get_amount_to_buy(self, instrument_id):
+        prices = self.sync_client.market_data.get_last_prices(instrument_id=[instrument_id])
+        price = to_float(prices.last_prices[0].price)
+        logger.info("Price - %s", str(price))
+
+        res = self.sync_client.operations.get_portfolio(account_id=self.account_id)
+        free_capital = res.total_amount_currencies.units
+        logger.info("Free capital in currencies (rub): %s", free_capital)
+
+        instrument_infos = self.sync_client.instruments.find_instrument(query=instrument_id,
+                                                                        instrument_kind=InstrumentType.INSTRUMENT_TYPE_SHARE)
+        instrument = instrument_infos.instruments[0] if len(instrument_infos.instruments) == 1 else False
+        if (instrument != False):
+            share_info = self.sync_client.instruments.share_by(id=instrument_id,
+                                                               id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_UID,
+                                                               class_code=instrument.class_code)
+            number_of_shares_in_lot = share_info.instrument.lot
+            amount = int((free_capital * self.buy_free_capital_percentage) / (price * number_of_shares_in_lot))
+            amount = 1 if amount < 0 else amount
+            logger.info("We will by %s lots",amount)
+            return amount
+
     def __get_compared_difference(self, bought_price, instrument_id):
         stop_position_price = to_float(bought_price) * (1 - self.stop_loss_profitability)
 
@@ -187,7 +209,7 @@ class TradingBot:
             # TODO there can be values of api_trade_available_flag,market_order_available_flag, limit_order_available_flag , they also can affect availability to trade
             if res.trading_status != SecurityTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING and res.trading_status != SecurityTradingStatus.SECURITY_TRADING_STATUS_DEALER_NORMAL_TRADING:
 
-                time_to_sleep = 20
+                time_to_sleep = 2000
                 logger.info("Trade is not open for work (status is %s), wait for %d seconds", res.trading_status,
                             time_to_sleep)
                 time.sleep(time_to_sleep)
@@ -197,9 +219,10 @@ class TradingBot:
     def list_securities(client):
         pprint("list_secrutities")
 
-    def list_portfolio(self):
+    def get_portfolio(self):
         res = self.sync_client.operations.get_portfolio(account_id=self.account_id)
         pprint(res)
+        return res
 
 
 bot = TradingBot(TOKEN, TARGET, sandbox=True)
