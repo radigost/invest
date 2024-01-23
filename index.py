@@ -67,10 +67,13 @@ class TradingBot:
 
         order = self.order_service.get_order_to_work(self.account_id)
         # TODO can start the strategy with selected account,or the porfolio item
-        self.start_strategy(order)
-        self.get_portfolio()
+        while True:
+            free_capital = self.sync_client.operations.get_portfolio(account_id=self.account_id).total_amount_currencies.units
+            self.run_strategy(order)
+            new_free_capital = self.sync_client.operations.get_portfolio(account_id=self.account_id).total_amount_currencies.units
+            logger.info("Old Capital: %s, New Free capital in currencies (rub): %s", free_capital,new_free_capital)
 
-    def start_strategy(self, order: OrderState = None):
+    def run_strategy(self, order: OrderState = None):
         instrument_id = None
         quantity_lots = 1
         bought_price = 0
@@ -97,7 +100,7 @@ class TradingBot:
             quantity_lots = order.lots_requested
             bought_price = self.order_service.wait_order_fulfillment(order, self.account_id)
 
-        self.__wait_to_sell_and_get_position_to_sell(instrument_id, bought_price)
+        self.__wait_to_sell_and_get_position_to_sell(instrument_id, bought_price, quantity_lots)
         sell_order = self.order_service.post_order(quantity=quantity_lots,
                                                    instrument_id=instrument_id,
                                                    direction=OrderDirection.ORDER_DIRECTION_SELL,
@@ -117,14 +120,14 @@ class TradingBot:
             logger.info("We have %s lots of %s", position_to_sell.quantity_lots.units, instrument_id)
         return position_to_sell
 
-    def __wait_to_sell_and_get_position_to_sell(self, instrument_id, bought_price: Quotation) -> bool:
+    def __wait_to_sell_and_get_position_to_sell(self, instrument_id, bought_price: Quotation, quantity_lots:int) -> bool:
         logger.info("waiting to sell instrument (instrument_id : %s)", instrument_id)
         self.__wait_market_to_open(instrument_id)
         sell_signal = False
         while sell_signal == False:
             time.sleep(10)
-            sell_signal = self.analytics.get_compared_difference(bought_price=bought_price,
-                                                         instrument_id=instrument_id)
+            sell_signal = self.analytics.get_compared_difference(bought_full_price=bought_price,
+                                                         instrument_id=instrument_id,quantity_lots=quantity_lots)
         return True
 
     def sandox_flush_all_accounts_and_reinitiate_one(self):

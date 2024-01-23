@@ -40,20 +40,24 @@ class Analytic():
             number_of_shares_in_lot = share_info.instrument.lot
             amount = int((free_capital * self.buy_free_capital_percentage) / (price * number_of_shares_in_lot))
             amount = 1 if amount < 0 else amount
-            logger.info("We will by %s lots", amount)
+            logger.info("We will buy %s lots", amount)
             return amount
 
-    def get_compared_difference(self, bought_price, instrument_id):
-        stop_position_price = to_float(bought_price) * (1 - self.stop_loss_profitability)
+    def get_compared_difference(self, bought_full_price, instrument_id, quantity_lots):
+        stop_position_price = to_float(bought_full_price) * (1 - self.stop_loss_profitability)
 
         res = self.sync_client.market_data.get_last_prices(instrument_id=[instrument_id])
         sell_price = res.last_prices[0].price
-        compared_difference_with_commissions = to_float(sell_price) - to_float(bought_price) - to_float(
-            bought_price) * self.commission - to_float(sell_price) * self.commission
-        margin = 100 * compared_difference_with_commissions / to_float(bought_price)
+        full_compared_difference_with_commissions = (
+                to_float(sell_price)*quantity_lots
+                - to_float(bought_full_price)
+                - to_float(bought_full_price) * self.commission
+                - to_float(sell_price)*quantity_lots * self.commission
+        )
+        margin = 100 * full_compared_difference_with_commissions / to_float(bought_full_price)
         logger.info("BuyPrice: %s,Price: %s, Difference: %s, Margin: %s",
-                    to_float(bought_price),
-                    to_float(sell_price),
-                    compared_difference_with_commissions, margin)
+                    to_float(bought_full_price),
+                    to_float(sell_price)*quantity_lots,
+                    full_compared_difference_with_commissions, margin)
 
         return margin > 1 or to_float(sell_price) <= stop_position_price
