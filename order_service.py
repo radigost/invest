@@ -7,7 +7,7 @@ from tinkoff.invest.services import Services
 logger = logging.getLogger(__name__)
 
 
-class OrderService():
+class OrderService:
     def __init__(self, sync_client: Services):
         self.sync_client = sync_client
 
@@ -28,7 +28,9 @@ class OrderService():
             logger.info("We have no pending orders")
             return None
         else:
-            # TODO if we start 2 bots one after another, first generated order, second bot starts after pending order is created, then 2 bots will work with same order, which is a bug, but at the moment I have 0 working instancesm hence need to change the logic before the prod
+            # TODO if we start 2 bots one after another, first generated order, second bot starts after pending order
+            #  is created, then 2 bots will work with same order, which is a bug, but at the moment I have 0 working
+            #  instances hence need to change the logic before the prod
             return orders[0]
 
     def list_orders(self, account_id):
@@ -42,7 +44,7 @@ class OrderService():
 
     def wait_order_fulfillment(self, order: OrderState | PostOrderResponse, account_id):
         order_fulfilled = False
-        while order_fulfilled == False:
+        while not order_fulfilled:
             res = self.sync_client.orders.get_order_state(account_id=account_id, order_id=order.order_id)
             status = res.execution_report_status
             if status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL:
