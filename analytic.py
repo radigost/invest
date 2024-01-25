@@ -12,6 +12,7 @@ class Analytic():
         self.stop_loss_profitability = 0.01
         self.buy_free_capital_percentage = 0.1
         self.commission = 0.0004
+        self.target_daily_profitability = 0.01
         self.sync_client = sync_client
         self.account_id = account_id
 
@@ -43,21 +44,24 @@ class Analytic():
             logger.info("We will buy %s lots", amount)
             return amount
 
-    def get_compared_difference(self, bought_full_price, instrument_id, quantity_lots):
-        stop_position_price = to_float(bought_full_price) * (1 - self.stop_loss_profitability)
+    def get_compared_difference(self, total_buy_price, instrument_id, quantity_lots, average_bought_price):
+        buy_price_float = to_float(average_bought_price) if average_bought_price is not None else to_float(
+            total_buy_price) / quantity_lots
+        stop_position_price = buy_price_float * (1 - self.stop_loss_profitability)
 
-        res = self.sync_client.market_data.get_last_prices(instrument_id=[instrument_id])
-        sell_price = res.last_prices[0].price
-        full_compared_difference_with_commissions = (
-                to_float(sell_price)*quantity_lots
-                - to_float(bought_full_price)
-                - to_float(bought_full_price) * self.commission
-                - to_float(sell_price)*quantity_lots * self.commission
+        last_prices = self.sync_client.market_data.get_last_prices(instrument_id=[instrument_id])
+        sell_price = last_prices.last_prices[0].price
+        profit_with_commissions = (
+                to_float(sell_price) - buy_price_float - buy_price_float * self.commission - to_float(
+            sell_price) * self.commission
         )
-        margin = 100 * full_compared_difference_with_commissions / to_float(bought_full_price)
-        logger.info("BuyPrice: %s,Price: %s, Difference: %s, Margin: %s",
-                    to_float(bought_full_price),
-                    to_float(sell_price)*quantity_lots,
-                    full_compared_difference_with_commissions, margin)
+        margin = 100 * profit_with_commissions / buy_price_float
+        logger.info(
+            "Buy Price: %s, Current Price: %s, Total profit(with comissions) : %s, Margin(with comissions): %s%%",
+            round(buy_price_float, 2),
+            round(to_float(sell_price), 2),
+            round(profit_with_commissions * quantity_lots, 2),
+            round(margin, 2)
+        )
 
-        return margin > 1 or to_float(sell_price) <= stop_position_price
+        return margin > self.target_daily_profitability * 100 or to_float(sell_price) <= stop_position_price
