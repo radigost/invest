@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import time
 from decimal import Decimal
 from enum import Enum
@@ -54,7 +55,7 @@ class TradingBot:
         logger.info("set up account to trade [%s]", self.account_id)
         self.order_service = OrderService(self.sync_client)
         self.analytics = Analytic(self.sync_client, account_id=self.account_id)
-        self.list_of_shares_in_work = []
+        self.positions_in_work = {}
 
     # if (self.sandbox == True):
     # self.sandox_flush_all_accounts_and_reinitiate_one()
@@ -82,11 +83,10 @@ class TradingBot:
         bought_price = 0
         average_bought_price = None
         if order is None:
-            instrument_id = self.analytics.get_instrument_of_the_strategy()
-            # we are starting from scratch
-            position_in_portfolio = self.__get_position_to_sell(instrument_id)
+            position_in_portfolio = self.__get_position_to_sell()
             if (position_in_portfolio) is None:
-                logger.info(" No position in portfolio, will create new order to buy %s", instrument_id)
+                instrument_id = self.analytics.get_instrument_of_the_strategy()
+                logger.info(" No position in portfolio to work with, will create new order to buy %s", instrument_id)
                 quantity_lots = self.analytics.get_amount_to_buy(instrument_id)
                 direction = OrderDirection.ORDER_DIRECTION_BUY
                 order_type = OrderType.ORDER_TYPE_BESTPRICE
@@ -94,7 +94,8 @@ class TradingBot:
                                                       order_type, self.account_id)
                 bought_price = self.order_service.wait_order_fulfillment(order, self.account_id)
             else:
-                logger.info("We have this position in portfolio, start to work with it (sell)")
+                logger.info("We have position in portfolio, start to work with it (sell), %s",str(position_in_portfolio))
+                instrument_id = position_in_portfolio.instrument_uid
                 quantity_lots = position_in_portfolio.quantity_lots.units
                 average_bought_price = position_in_portfolio.average_position_price
         else:
@@ -116,13 +117,15 @@ class TradingBot:
         result = to_float(selled_price) - to_float(bought_price)
         logger.info("result is %s (without commissions)", result)
 
-    def __get_position_to_sell(self, instrument_id):
-        res = self.sync_client.operations.get_portfolio(account_id=self.account_id)
-        position_to_sell = next((x for x in res.positions if x.instrument_uid == instrument_id), None)
-        # TODO it can happen that we do not have that instrument in the portpolio
-        if position_to_sell:
-            logger.info("We have %s lots of %s", position_to_sell.quantity_lots.units, instrument_id)
-        return position_to_sell
+    def __get_position_to_sell(self):
+        positions = self.sync_client.operations.get_portfolio(account_id=self.account_id).positions
+        free_positions = list(filter(lambda position: self.positions_in_work.get(
+            position.instrument_uid) is None and position.instrument_type == 'share',
+                                     positions))
+
+        chosen_position = random.choice(free_positions)
+        self.positions_in_work[chosen_position.instrument_uid] = chosen_position
+        return chosen_position
 
     def __wait_to_sell_and_get_position_to_sell(self, instrument_id, bought_price: Quotation, quantity_lots: int,
                                                 average_bought_price) -> bool:
