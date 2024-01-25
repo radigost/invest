@@ -1,6 +1,9 @@
 import logging
+import random
+from pprint import pprint
 
-from tinkoff.invest import InstrumentType, InstrumentIdType
+from tinkoff.invest import InstrumentType, InstrumentIdType, InstrumentStatus
+from tinkoff.invest.services import Services
 
 from utils import to_float
 
@@ -13,13 +16,25 @@ class Analytic():
         self.buy_free_capital_percentage = 0.1
         self.commission = 0.0004
         self.target_daily_profitability = 0.01
-        self.sync_client = sync_client
+        self.sync_client: Services = sync_client
         self.account_id = account_id
 
-    def get_instrument_of_the_strategy(self):
+    def get_instrument_of_the_strategy(self) -> str:
         GAZPROM_SHARES = '962e2a95-02a9-4171-abd7-aa198dbe643a'
         YANDEX_SHARES = '10e17a87-3bce-4a1f-9dfc-720396f98a3c'
-        return YANDEX_SHARES
+
+        instruments = self.sync_client.instruments.get_favorites().favorite_instruments
+        instruments = list(filter(lambda instrument:
+                                  instrument.instrument_kind == InstrumentType.INSTRUMENT_TYPE_SHARE and
+                                  instrument.api_trade_available_flag is True,
+                                  instruments))
+
+        # for instrument in instruments:
+        #     pprint(instrument)
+        random_share = self.sync_client.instruments.share_by(id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI,
+                                                             id=random.choice(instruments).figi)
+        pprint(random_share)
+        return random_share.instrument.uid
 
     def get_amount_to_buy(self, instrument_id) -> int:
         prices = self.sync_client.market_data.get_last_prices(instrument_id=[instrument_id])

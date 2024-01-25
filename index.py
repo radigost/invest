@@ -36,7 +36,6 @@ class TypeOfStrategy(Enum):
 # Assumption: Bot trades whole list of shares
 
 
-
 class TradingBot:
 
     def __init__(self, token, target, sandbox: bool):
@@ -55,6 +54,7 @@ class TradingBot:
         logger.info("set up account to trade [%s]", self.account_id)
         self.order_service = OrderService(self.sync_client)
         self.analytics = Analytic(self.sync_client, account_id=self.account_id)
+        self.list_of_shares_in_work = []
 
     # if (self.sandbox == True):
     # self.sandox_flush_all_accounts_and_reinitiate_one()
@@ -69,10 +69,12 @@ class TradingBot:
         # order = self.order_service.get_order_to_work(self.account_id)
         # TODO can start the strategy with selected account,or the porfolio item
         while True:
-            free_capital = self.sync_client.operations.get_portfolio(account_id=self.account_id).total_amount_currencies.units
+            free_capital = self.sync_client.operations.get_portfolio(
+                account_id=self.account_id).total_amount_currencies.units
             self.run_strategy(order)
-            new_free_capital = self.sync_client.operations.get_portfolio(account_id=self.account_id).total_amount_currencies.units
-            logger.info("Old Capital: %s, New Free capital in currencies (rub): %s", free_capital,new_free_capital)
+            new_free_capital = self.sync_client.operations.get_portfolio(
+                account_id=self.account_id).total_amount_currencies.units
+            logger.info("Old Capital: %s, New Free capital in currencies (rub): %s", free_capital, new_free_capital)
 
     def run_strategy(self, order: OrderState = None):
         instrument_id = None
@@ -84,7 +86,7 @@ class TradingBot:
             # we are starting from scratch
             position_in_portfolio = self.__get_position_to_sell(instrument_id)
             if (position_in_portfolio) is None:
-                logger.info("Create new order")
+                logger.info(" No position in portfolio, will create new order to buy %s", instrument_id)
                 quantity_lots = self.analytics.get_amount_to_buy(instrument_id)
                 direction = OrderDirection.ORDER_DIRECTION_BUY
                 order_type = OrderType.ORDER_TYPE_BESTPRICE
@@ -92,7 +94,7 @@ class TradingBot:
                                                       order_type, self.account_id)
                 bought_price = self.order_service.wait_order_fulfillment(order, self.account_id)
             else:
-                logger.info("We have this position in portfolio, start to work with it")
+                logger.info("We have this position in portfolio, start to work with it (sell)")
                 quantity_lots = position_in_portfolio.quantity_lots.units
                 average_bought_price = position_in_portfolio.average_position_price
         else:
@@ -102,7 +104,7 @@ class TradingBot:
             quantity_lots = order.lots_requested
             bought_price = self.order_service.wait_order_fulfillment(order, self.account_id)
 
-        self.__wait_to_sell_and_get_position_to_sell(instrument_id, bought_price, quantity_lots,average_bought_price)
+        self.__wait_to_sell_and_get_position_to_sell(instrument_id, bought_price, quantity_lots, average_bought_price)
         sell_order = self.order_service.post_order(quantity=quantity_lots,
                                                    instrument_id=instrument_id,
                                                    direction=OrderDirection.ORDER_DIRECTION_SELL,
@@ -122,14 +124,17 @@ class TradingBot:
             logger.info("We have %s lots of %s", position_to_sell.quantity_lots.units, instrument_id)
         return position_to_sell
 
-    def __wait_to_sell_and_get_position_to_sell(self, instrument_id, bought_price: Quotation, quantity_lots:int,average_bought_price) -> bool:
+    def __wait_to_sell_and_get_position_to_sell(self, instrument_id, bought_price: Quotation, quantity_lots: int,
+                                                average_bought_price) -> bool:
         logger.info("waiting to sell instrument (instrument_id : %s)", instrument_id)
         self.__wait_market_to_open(instrument_id)
         sell_signal = False
         while sell_signal == False:
             time.sleep(10)
             sell_signal = self.analytics.get_compared_difference(total_buy_price=bought_price,
-                                                   instrument_id=instrument_id, quantity_lots=quantity_lots,average_bought_price=average_bought_price)
+                                                                 instrument_id=instrument_id,
+                                                                 quantity_lots=quantity_lots,
+                                                                 average_bought_price=average_bought_price)
             # sell_signal =False
         return True
 
@@ -148,8 +153,6 @@ class TradingBot:
             account_id=account.id,
             amount=MoneyValue(units=money.units, nano=money.nano, currency=currency),
         )
-
-
 
     def __wait_market_to_open(self, instrument_id):
 
