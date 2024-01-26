@@ -8,7 +8,8 @@ from pprint import pprint
 
 from dotenv import load_dotenv
 from grpc._cython.cygrpc import Optional
-from tinkoff.invest import Client, MoneyValue, OrderDirection, OrderType, SecurityTradingStatus, Quotation, OrderState
+from tinkoff.invest import Client, MoneyValue, OrderDirection, OrderType, SecurityTradingStatus, Quotation, OrderState, \
+    AsyncClient
 from tinkoff.invest.services import Services
 from tinkoff.invest.utils import decimal_to_quotation
 
@@ -19,13 +20,15 @@ from utils import to_float
 load_dotenv()
 TOKEN = os.getenv('TINKOFF_API_TOKEN')
 TARGET = os.getenv('TINKOFF_CLIENT_TARGET')
-log_level = logging.DEBUG
+log_level = logging.INFO
 
 logging.basicConfig(
+    # filename='example.log',
+    # filemode='w',
     level=log_level,
     format="[%(levelname)-5s] %(asctime)-19s %(name)s:%(lineno)d: %(message)s",
 )
-logging.getLogger("tinkoff").setLevel(log_level)
+logging.getLogger("tinkoff").setLevel(logging.WARN)
 logger = logging.getLogger(__name__)
 
 
@@ -43,7 +46,7 @@ class TradingBot:
         self.token = token
         self.target = target
         self.sandbox = sandbox
-        # self.client: Optional[AsyncServices]
+        self.client = AsyncClient(self.token,target=self.target).__aenter__()
         self.sync_client: Optional[Services]
         self.account_id: Optional[str]
 
@@ -53,91 +56,74 @@ class TradingBot:
         account = res.accounts[0]
         self.account_id = account.id
         logger.info("set up account to trade [%s]", self.account_id)
-        self.order_service = OrderService(self.sync_client)
+        self.order_service = OrderService(self.sync_client, self.account_id)
         self.analytics = Analytic(self.sync_client, account_id=self.account_id)
         self.positions_in_work = {}
-
-    # if (self.sandbox == True):
-    # self.sandox_flush_all_accounts_and_reinitiate_one()
+        self.previous_capitalisation = 0
 
     def main(self):
-
-        # stock_name = "GAZP"
-        # buy_or_sell = "BUY"
-        amount = 1
-
-        order = None
-        # order = self.order_service.get_order_to_work(self.account_id)
-        # TODO can start the strategy with selected account,or the porfolio item
+        self.order_service.put_unfulfilled_orders_to_work()
+        # TODO can start the strategy with selected account
         while True:
-            free_capital = self.sync_client.operations.get_portfolio(
-                account_id=self.account_id).total_amount_currencies.units
-            self.run_strategy(order)
+            free_capital = self.previous_capitalisation
+
+            self.run_strategy()
+
             new_free_capital = self.sync_client.operations.get_portfolio(
                 account_id=self.account_id).total_amount_currencies.units
             logger.info("Old Capital: %s, New Free capital in currencies (rub): %s", free_capital, new_free_capital)
+            self.previous_capitalisation = new_free_capital
 
-    def run_strategy(self, order: OrderState = None):
-        instrument_id = None
-        quantity_lots = 1
-        bought_price = 0
-        average_bought_price = None
-        if order is None:
-            position_in_portfolio = self.__get_position_to_sell()
-            if (position_in_portfolio) is None:
-                instrument_id = self.analytics.get_instrument_of_the_strategy()
-                logger.info(" No position in portfolio to work with, will create new order to buy %s", instrument_id)
-                quantity_lots = self.analytics.get_amount_to_buy(instrument_id)
-                direction = OrderDirection.ORDER_DIRECTION_BUY
-                order_type = OrderType.ORDER_TYPE_BESTPRICE
-                order = self.order_service.post_order(quantity_lots, instrument_id, direction,
-                                                      order_type, self.account_id)
-                bought_price = self.order_service.wait_order_fulfillment(order, self.account_id)
-            else:
-                logger.info("We have position in portfolio, start to work with it (sell), %s",str(position_in_portfolio))
-                instrument_id = position_in_portfolio.instrument_uid
-                quantity_lots = position_in_portfolio.quantity_lots.units
-                average_bought_price = position_in_portfolio.average_position_price
+    def run_strategy(self):
+        free_positions_in_portfolio = self.__get_free_position_to_sell()
+        if (len(free_positions_in_portfolio)) > 0:
+            for position_in_portfolio in free_positions_in_portfolio:
+                self.__fill_in_free_positions(position_in_portfolio)
         else:
-            # TODO also need to wait until market is open
-            logger.info("Start to work with present unfullfilled order, order %s", str(order))
-            instrument_id = order.instrument_uid
-            quantity_lots = order.lots_requested
-            bought_price = self.order_service.wait_order_fulfillment(order, self.account_id)
+            self.__buy_new_instrument()
 
-        self.__wait_to_sell_and_get_position_to_sell(instrument_id, bought_price, quantity_lots, average_bought_price)
-        sell_order = self.order_service.post_order(quantity=quantity_lots,
-                                                   instrument_id=instrument_id,
-                                                   direction=OrderDirection.ORDER_DIRECTION_SELL,
-                                                   order_type=OrderType.ORDER_TYPE_BESTPRICE,
-                                                   account_id=self.account_id)
-        selled_price = self.order_service.wait_order_fulfillment(sell_order, self.account_id)
+    def __fill_in_free_positions(self, position_in_portfolio):
+        logger.info("We found position in portfolio, start to work with it (sell), %s", str(position_in_portfolio))
+        instrument_id = position_in_portfolio.instrument_uid
+        quantity_lots = position_in_portfolio.quantity_lots.units
+        average_bought_price = position_in_portfolio.average_position_price
+        self.positions_in_work[instrument_id] = position_in_portfolio
+        self.__wait_to_sell_and_get_position_to_sell(instrument_id=instrument_id, quantity_lots=quantity_lots,
+                                                     average_bought_price=average_bought_price)
+        self.order_service.post_order(quantity=quantity_lots,
+                                      instrument_id=instrument_id,
+                                      direction=OrderDirection.ORDER_DIRECTION_SELL,
+                                      order_type=OrderType.ORDER_TYPE_BESTPRICE,
+                                      account_id=self.account_id)
 
-        # TODO can be different currency
-        result = to_float(selled_price) - to_float(bought_price)
-        logger.info("result is %s (without commissions)", result)
+    def __buy_new_instrument(self):
+        logger.info(" No position in portfolio to work with, will find new instrument to work with")
+        instrument_id = self.analytics.get_instrument_of_the_strategy()
+        logger.info("will buy %s", instrument_id)
+        quantity_lots = self.analytics.get_amount_to_buy(instrument_id)
+        direction = OrderDirection.ORDER_DIRECTION_BUY
+        order_type = OrderType.ORDER_TYPE_BESTPRICE
+        self.order_service.post_order(quantity_lots, instrument_id, direction, order_type, self.account_id)
 
-    def __get_position_to_sell(self):
+    def __get_free_position_to_sell(self):
         positions = self.sync_client.operations.get_portfolio(account_id=self.account_id).positions
         free_positions = list(filter(lambda position: self.positions_in_work.get(
             position.instrument_uid) is None and position.instrument_type == 'share',
                                      positions))
 
         chosen_position = random.choice(free_positions)
-        self.positions_in_work[chosen_position.instrument_uid] = chosen_position
-        return chosen_position
+        return free_positions
 
-    def __wait_to_sell_and_get_position_to_sell(self, instrument_id, bought_price: Quotation, quantity_lots: int,
+    def __wait_to_sell_and_get_position_to_sell(self, instrument_id, quantity_lots: int,
                                                 average_bought_price) -> bool:
         logger.info("waiting to sell instrument (instrument_id : %s)", instrument_id)
         self.__wait_market_to_open(instrument_id)
         sell_signal = False
         while sell_signal == False:
             time.sleep(10)
-            sell_signal = self.analytics.get_compared_difference(total_buy_price=bought_price,
-                                                                 instrument_id=instrument_id,
-                                                                 quantity_lots=quantity_lots,
-                                                                 average_bought_price=average_bought_price)
+            sell_signal = self.analytics.calculate_sell_signal(instrument_id=instrument_id,
+                                                               quantity_lots=quantity_lots,
+                                                               average_bought_price=average_bought_price)
             # sell_signal =False
         return True
 

@@ -26,7 +26,7 @@ class Analytic():
         instruments = self.sync_client.instruments.get_favorites().favorite_instruments
         instruments = list(filter(lambda instrument:
                                   instrument.instrument_kind == InstrumentType.INSTRUMENT_TYPE_SHARE and
-                                  instrument.api_trade_available_flag is True,
+                                  instrument.api_trade_available_flag is True and instrument,
                                   instruments))
 
         # for instrument in instruments:
@@ -59,7 +59,7 @@ class Analytic():
             logger.info("We will buy %s lots", amount)
             return amount
 
-    def get_compared_difference(self, total_buy_price, instrument_id, quantity_lots, average_bought_price):
+    def calculate_sell_signal(self, total_buy_price, instrument_id, quantity_lots, average_bought_price):
         buy_price_float = to_float(average_bought_price) if average_bought_price is not None else to_float(
             total_buy_price) / quantity_lots
         stop_position_price = buy_price_float * (1 - self.stop_loss_profitability)
@@ -71,12 +71,22 @@ class Analytic():
             sell_price) * self.commission
         )
         margin = 100 * profit_with_commissions / buy_price_float
-        logger.info(
+        logger.debug(
             "Buy Price: %s, Current Price: %s, Total profit(with comissions) : %s, Margin(with comissions): %s%%",
             round(buy_price_float, 2),
             round(to_float(sell_price), 2),
             round(profit_with_commissions * quantity_lots, 2),
             round(margin, 2)
         )
+        is_sell_signal = margin > self.target_daily_profitability * 100 or to_float(sell_price) <= stop_position_price
+        if is_sell_signal:
+            logger.info(
+                "Buy Price: %s, Current Price: %s, Total profit(with comissions) : %s, Margin(with comissions): %s%%",
+                round(buy_price_float, 2),
+                round(to_float(sell_price), 2),
+                round(profit_with_commissions * quantity_lots, 2),
+                round(margin, 2)
+            )
 
-        return margin > self.target_daily_profitability * 100 or to_float(sell_price) <= stop_position_price
+
+        return is_sell_signal
