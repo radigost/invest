@@ -13,7 +13,7 @@ class OrderService:
         self.account_id = account_id
         self.unfulfilled_orders_queue = []
 
-    def post_order(self, quantity: int, instrument_id, direction, order_type, account_id) -> PostOrderResponse:
+    async def post_order(self, quantity: int, instrument_id, direction, order_type, account_id) -> PostOrderResponse:
         res = self.sync_client.orders.post_order(
             quantity=quantity,
             instrument_id=instrument_id,
