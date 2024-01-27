@@ -1,0 +1,11 @@
+services:
+    bot:
+      image: invest_bot
+      env_file:
+        - .env
+      environment:
+        - TINKOFF_API_TOKEN=${TINKOFF_API_TOKEN}
+        - TINKOFF_CLIENT_TARGET=${TINKOFF_CLIENT_TARGET}
+        - BOT_ENV=${BOT_ENV}
+        - TINKOFF_UIDS=${TINKOFF_UIDS}
+        - LOG_LEVEL=${LOG_LEVEL}
