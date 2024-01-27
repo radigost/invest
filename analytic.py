@@ -29,12 +29,9 @@ class Analytic():
                                   instrument.api_trade_available_flag is True and instrument,
                                   instruments))
 
-        # for instrument in instruments:
-        #     pprint(instrument)
         random_share = self.sync_client.instruments.share_by(id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI,
                                                              id=random.choice(instruments).figi)
-        pprint(random_share)
-        return random_share.instrument.uid
+        return YANDEX_SHARES
 
     def get_amount_to_buy(self, instrument_id) -> int:
         prices = self.sync_client.market_data.get_last_prices(instrument_id=[instrument_id])
@@ -59,7 +56,7 @@ class Analytic():
             logger.info("We will buy %s lots", amount)
             return amount
 
-    def calculate_sell_signal(self, total_buy_price, instrument_id, quantity_lots, average_bought_price):
+    def calculate_sell_signal(self, instrument_id, quantity_lots, average_bought_price,total_buy_price = None,):
         buy_price_float = to_float(average_bought_price) if average_bought_price is not None else to_float(
             total_buy_price) / quantity_lots
         stop_position_price = buy_price_float * (1 - self.stop_loss_profitability)

@@ -10,7 +10,7 @@ from pprint import pprint
 from dotenv import load_dotenv
 from grpc._cython.cygrpc import Optional
 from tinkoff.invest import Client, MoneyValue, OrderDirection, OrderType, SecurityTradingStatus, Quotation, OrderState, \
-    AsyncClient
+    AsyncClient, PortfolioPosition
 from tinkoff.invest.services import Services
 from tinkoff.invest.utils import decimal_to_quotation
 
@@ -21,7 +21,7 @@ from utils import to_float
 load_dotenv()
 TOKEN = os.getenv('TINKOFF_API_TOKEN')
 TARGET = os.getenv('TINKOFF_CLIENT_TARGET')
-log_level = logging.INFO
+log_level = int(os.getenv('LOG_LEVEL'))
 
 logging.basicConfig(
     # filename='example.log',
@@ -62,77 +62,68 @@ class TradingBot:
         self.positions_in_work = {}
         self.previous_capitalisation = 0
 
-    async def main(self):
+    def main(self):
         self.order_service.put_unfulfilled_orders_to_work()
         # TODO can start the strategy with selected account
         while True:
             free_capital = self.previous_capitalisation
-
-            await self.run_strategy()
+            self.run_strategy()
 
             new_free_capital = self.sync_client.operations.get_portfolio(
                 account_id=self.account_id).total_amount_currencies.units
             logger.info("Old Capital: %s, New Free capital in currencies (rub): %s", free_capital, new_free_capital)
             self.previous_capitalisation = new_free_capital
 
-    async def run_strategy(self):
-        async with asyncio.TaskGroup() as tg:
-            free_positions_in_portfolio = self.__get_free_position_to_sell()
-            if (len(free_positions_in_portfolio)) > 0:
-                for position_in_portfolio in free_positions_in_portfolio:
-                    self.__fill_in_free_positions(position_in_portfolio)
-                    task = tg.create_task(
-                        self.__wait_to_sell_and_get_position_to_sell(instrument_id=position_in_portfolio.instrument_uid,
-                                                                     quantity_lots=position_in_portfolio.quantity_lots.units,
-                                                                     average_bought_price=position_in_portfolio.average_position_price
-                                                                     )
-                    )
+    def run_strategy(self):
+        instrument_uid = self.analytics.get_instrument_of_the_strategy()
+        position_in_portfolio = self.__get_position_in_porfolio_by_uid(instrument_uid)
+        if not position_in_portfolio:
+            self.__buy_new_instrument(instrument_id=instrument_uid)
+            position_in_portfolio = self.__get_position_in_porfolio_by_uid(instrument_uid)
 
-                    task.add_done_callback(
-                        lambda res: self.order_service.post_order(quantity=position_in_portfolio.quantity_lots.units,
-                                                                  instrument_id=position_in_portfolio.instrument_uid,
-                                                                  direction=OrderDirection.ORDER_DIRECTION_SELL,
-                                                                  order_type=OrderType.ORDER_TYPE_BESTPRICE,
-                                                                  account_id=self.account_id)
-                    )
-
-            else:
-                self.__buy_new_instrument()
+        self.__wait_to_sell_and_get_position_to_sell(instrument_id=position_in_portfolio.instrument_uid,
+                                                     quantity_lots=position_in_portfolio.quantity_lots.units,
+                                                     average_bought_price=position_in_portfolio.average_position_price_fifo
+                                                     )
+        self.order_service.post_order(quantity=position_in_portfolio.quantity_lots.units,
+                                      instrument_id=position_in_portfolio.instrument_uid,
+                                      direction=OrderDirection.ORDER_DIRECTION_SELL,
+                                      order_type=OrderType.ORDER_TYPE_BESTPRICE,
+                                      account_id=self.account_id)
 
     def __fill_in_free_positions(self, position_in_portfolio):
         logger.info("We found position in portfolio, start to work with it (sell), %s", str(position_in_portfolio))
         instrument_id = position_in_portfolio.instrument_uid
         self.positions_in_work[instrument_id] = position_in_portfolio
 
-    def __buy_new_instrument(self):
+    def __buy_new_instrument(self, instrument_id):
         logger.info(" No position in portfolio to work with, will find new instrument to work with")
-        instrument_id = self.analytics.get_instrument_of_the_strategy()
         logger.info("will buy %s", instrument_id)
         quantity_lots = self.analytics.get_amount_to_buy(instrument_id)
         direction = OrderDirection.ORDER_DIRECTION_BUY
         order_type = OrderType.ORDER_TYPE_BESTPRICE
         self.order_service.post_order(quantity_lots, instrument_id, direction, order_type, self.account_id)
+        return quantity_lots
 
-    def __get_free_position_to_sell(self):
+    def __get_position_in_porfolio_by_uid(self, instrument_id) -> PortfolioPosition:
+        chosen_position = None
         positions = self.sync_client.operations.get_portfolio(account_id=self.account_id).positions
-        free_positions = list(filter(lambda position: self.positions_in_work.get(
-            position.instrument_uid) is None and position.instrument_type == 'share',
-                                     positions))
+        filtered_position = list(filter(lambda position: instrument_id == position.instrument_uid, positions))
+        if len(filtered_position) > 0:
+            chosen_position = filtered_position[0]
+        return chosen_position
 
-        chosen_position = random.choice(free_positions)
-        return free_positions
-
-    async def __wait_to_sell_and_get_position_to_sell(self, instrument_id, quantity_lots: int,
-                                                      average_bought_price) -> bool:
+    def __wait_to_sell_and_get_position_to_sell(self, instrument_id, quantity_lots: int,
+                                                average_bought_price) -> bool:
         logger.info("waiting to sell instrument (instrument_id : %s)", instrument_id)
         self.__wait_market_to_open(instrument_id)
         sell_signal = False
         while not sell_signal:
-            await asyncio.sleep(10)
+            time.sleep(10)
             sell_signal = self.analytics.calculate_sell_signal(instrument_id=instrument_id,
                                                                quantity_lots=quantity_lots,
                                                                average_bought_price=average_bought_price)
-        return True
+        return sell_signal
 
     def sandox_flush_all_accounts_and_reinitiate_one(self):
         res = self.sync_client.users.get_accounts()
@@ -156,7 +147,6 @@ class TradingBot:
             res = self.sync_client.market_data.get_trading_status(instrument_id=instrument_id)
             # TODO there can be values of api_trade_available_flag,market_order_available_flag, limit_order_available_flag , they also can affect availability to trade
             if res.trading_status != SecurityTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING and res.trading_status != SecurityTradingStatus.SECURITY_TRADING_STATUS_DEALER_NORMAL_TRADING:
-
                 time_to_sleep = 2000
                 logger.info("Trade is not open for work (status is %s), wait for %d seconds", res.trading_status,
                             time_to_sleep)
@@ -174,4 +164,4 @@ class TradingBot:
 
 
 bot = TradingBot(TOKEN, TARGET, sandbox=True)
-asyncio.run(bot.main())
+bot.main()

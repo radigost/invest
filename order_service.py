@@ -13,7 +13,7 @@ class OrderService:
         self.account_id = account_id
         self.unfulfilled_orders_queue = []
 
-    async def post_order(self, quantity: int, instrument_id, direction, order_type, account_id) -> PostOrderResponse:
+    def post_order(self, quantity: int, instrument_id, direction, order_type, account_id) -> PostOrderResponse:
         res = self.sync_client.orders.post_order(
             quantity=quantity,
             instrument_id=instrument_id,
@@ -23,6 +23,7 @@ class OrderService:
         )
         logger.debug("posted order: %s", str(res))
         self.unfulfilled_orders_queue.append(res)
+        self.__wait_order_fulfillment(res)
         return res
 
     def put_unfulfilled_orders_to_work(self):
@@ -58,6 +59,6 @@ class OrderService:
                 executed_price = res.executed_order_price
                 logger.info("Executed order_id %s, with price %s and direction %s : %s", order.order_id, executed_price,
                             order.direction, str(res))
-                self.unfulfilled_orders_queue = (
-                    list(filter(lambda unfulfilled_order: unfulfilled_order.order_id != order.order_id,
-                                self.unfulfilled_orders_queue)))
+                order_fulfilled = True
+            else:
+                time.sleep(10)
