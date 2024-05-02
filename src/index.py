@@ -24,8 +24,8 @@ TARGET = os.getenv('TINKOFF_CLIENT_TARGET')
 log_level = int(os.getenv('LOG_LEVEL'))
 
 logging.basicConfig(
-    # filename='example.log',
-    # filemode='w',
+    filename='example.log',
+    filemode='w',
     level=log_level,
     format="[%(levelname)-5s] %(asctime)-19s %(name)s:%(lineno)d: %(message)s",
 )
@@ -67,6 +67,9 @@ class TradingBot:
         # TODO can start the strategy with selected account
         while True:
             free_capital = self.previous_capitalisation
+            new_free_capital = self.sync_client.operations.get_portfolio(
+                account_id=self.account_id).total_amount_currencies.units
+            logger.info("Starting the strategy, capital is (rub): %s",  new_free_capital)
             self.run_strategy()
 
             new_free_capital = self.sync_client.operations.get_portfolio(

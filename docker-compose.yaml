@@ -9,3 +9,4 @@ services:
         - BOT_ENV=${BOT_ENV}
         - TINKOFF_UIDS=${TINKOFF_UIDS}
         - LOG_LEVEL=${LOG_LEVEL}
+      restart: always
